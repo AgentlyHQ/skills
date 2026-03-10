@@ -4,7 +4,7 @@ description: Use this skill whenever the user wants to summarize, digest, recap,
 license: MIT
 metadata:
   author: Agently
-  version: 1.0.0
+  version: 1.0.1
 ---
 
 # Summarize WhatsApp Group Chats
@@ -35,14 +35,14 @@ If the user has specified a chat name, fuzzy-match it against the output. Confir
 Default behavior: fetch the **past 24 hours**. Adjust if the user specifies a different time range.
 
 ```bash
-# Fetch last 24 hours (default) (please update YYYY-MM-DD below for --after and --before)
-wacli messages --chat "<chat-id>" --after "<YYYY-MM-DD of one day before today's date>" --before "<YYYY-MM-DD of today's date>"
+# Fetch last 24 hours (default) (please update YYYY-MM-DD below for --after and --before in RFC3339 format)
+wacli messages list --chat "<chat-id>" --after "<YYYY-MM-DD HH:MM:SS of one day before today's date>" --before "<YYYY-MM-DD HH:MM:SS of today's date>"
 
-# Fetch by specific date range (if user requests)
-wacli messages --chat "<chat-id>" --after "YYYY-MM-DD" --before "YYYY-MM-DD"
+# Fetch by specific date range (if user requests) in RFC3339 format
+wacli messages list --chat "<chat-id>" --after "YYYY-MM-DD HH:MM:SS" --before "YYYY-MM-DD HH:MM:SS"
 
 # Fetch by message count (if user requests)
-wacli messages --chat "<chat-id>" --limit 200
+wacli messages list --chat "<chat-id>" --limit 200
 ```
 
 Capture the raw output. Note the **timestamp of the oldest and newest message** in the fetched data — this becomes the data freshness marker.
@@ -67,7 +67,7 @@ wacli messages --chat "<chat-id>" --after "<YYYY-MM-DD of one day before today's
 
 If the user specifies a different filename or path, use that instead.
 
-If user prefers JSON, follow that by adding global `--json` flag to `wacli`.
+If user prefers JSON, follow that by adding global `--json` flag the above `wacli` command.
 
 ---
 
@@ -161,7 +161,7 @@ Global Flags:
 
 ```bash
 wacli chats                          # List all chats
-wacli messages --chat "<chat-id>" --after "<YYYY-MM-DD of one day before today's date>" --before "<YYYY-MM-DD of today's date>" # Fetch last 24 hours (default) (please update YYYY-MM-DD below for --after and --before)
+wacli messages list --chat "<chat-id>" --after "<YYYY-MM-DD of one day before today's date>" --before "<YYYY-MM-DD of today's date>" # Fetch last 24 hours (default) (please update YYYY-MM-DD below for --after and --before)
 ```
 
 > If `wacli` has different flags on the user's version, run `wacli --help` or `wacli messages --help` to check and adapt.
