@@ -4,6 +4,10 @@ description: Build and query a knowledge bank from Google Docs meeting notes. Us
 compatibility:
   - Google Workspace CLI (gws) - https://github.com/googleworkspace/cli
   - Authenticated Google Workspace account with Drive access
+license: MIT
+metadata:
+  author: Agently
+  version: 1.0.0
 ---
 
 # Meeting Notes Knowledge Bank
