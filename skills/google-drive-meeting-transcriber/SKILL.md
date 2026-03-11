@@ -1,35 +1,37 @@
 ---
 name: google-drive-meeting-transcriber
-description: Process meeting folders with transcript files and generate executive meeting notes in Google Docs. Use when the user wants to transcribe meetings, process meeting folders, create meeting notes from transcripts, or convert raw transcripts into formatted Google Docs. Trigger on phrases like "transcribe my meetings", "process meeting folders", "create meeting notes from transcripts", "convert transcripts to docs", or when user provides a meetings folder to process. Always use this skill when working with a folder structure containing meeting transcripts that need to be formatted into professional meeting notes.
+description: Process NEW meeting folders with transcript files and generate executive meeting notes in Google Docs. Use when the user wants to transcribe meetings, process meeting folders, create meeting notes from transcripts, or convert raw transcripts into formatted Google Docs. Trigger on phrases like "transcribe my meetings", "process meeting folders", "create meeting notes from transcripts", "convert transcripts to docs", or when user provides a meetings folder to process. Always use this skill when working with a folder structure containing meeting transcripts that need to be formatted into professional meeting notes.
 compatibility:
   - Google Workspace CLI (gws) - https://github.com/googleworkspace/cli
   - Authenticated Google Workspace account with Drive and Docs access
 license: MIT
 metadata:
   author: Agently
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # Meeting Notes Transcriber
 
 Transform unstructured transcript text files inside meeting subfolders into clean, executive-quality meeting notes, written as **Google Docs** in the root folder.
 
+Only processes **new** meeting folders — ones that don't already have a corresponding Google Doc in the root folder.
+
 ## What This Does
 
-**Input**: Root Drive folder (e.g., "Meetings") containing subfolders, one per meeting  
-**Output**: One Google Doc per meeting in the root folder, titled `YYYYMMDD [meeting name]`  
-**Skip**: Meetings with only audio/video (no transcript `.txt`)
+**Input**: Root Drive folder (e.g., "Meetings") containing subfolders, one per meeting
+**Output**: One Google Doc per meeting in the root folder, titled `YYYYMMDD [meeting name]`
+**Skip**: Meetings with only audio/video (no transcript `.txt`), or meetings already processed (doc exists)
 
 ### Example Structure
 
 ```
 📁 Meetings/ (ROOT_FOLDER_ID)
-  ├── 📁 2026-02-26 12.26.41 Amy and Charlie/
+  ├── 📁 2026-02-26 12.26.41 Amy & Charlie/
   │   └── zoom_transcript.txt
   ├── 📁 2026-03-01 14.30.00 Team Sync/
   │   └── transcript.txt
-  └── 📄 20260226 Amy and Charlie.gdoc (created by this skill)
-  └── 📄 20260301 Team Sync.gdoc (created by this skill)
+  └── 📄 20260226 Amy & Charlie.gdoc   ← created by this skill (skip next run)
+  └── 📄 20260301 Team Sync.gdoc       ← created by this skill (skip next run)
 ```
 
 ---
@@ -64,6 +66,7 @@ User: "Transcribe meetings in folder [folder name or ID]"
 
 ```
 User: "Transcribe meetings in 'Team Meetings' folder, overwrite existing docs"
+User: "Transcribe meetings in 'Team Meetings', dry run"
 ```
 
 ---
@@ -80,8 +83,8 @@ User: "Transcribe meetings in 'Team Meetings' folder, overwrite existing docs"
 ### Optional
 
 - **OVERWRITE** (default: `false`)
-  - If `true`, and a doc with the same title exists in root folder, overwrite its contents
-  - If `false`, create new doc even if same title exists
+  - If `false` (default), skip any meeting folder that already has a matching doc in the root folder
+  - If `true`, re-generate and overwrite the existing doc content
 
 - **DRY_RUN** (default: `false`)
   - If `true`, do everything except creating/writing Docs
@@ -110,38 +113,88 @@ gws drive files list \
   --query "'${ROOT_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false" \
   --format json > /tmp/meeting_folders.json
 
-# Show what we found
 echo "Found meeting folders:"
 jq -r '.files[] | "\(.name) (ID: \(.id))"' /tmp/meeting_folders.json
 ```
 
-### Step 3: Process Each Meeting Folder
+### Step 3: Get Existing Docs in Root Folder (for "new only" detection)
+
+Before processing any folder, fetch the list of Google Docs already in the root folder:
+
+```bash
+gws drive files list \
+  --query "'${ROOT_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.document' and trashed = false" \
+  --format json > /tmp/existing_docs.json
+
+# Build a list of existing doc titles (normalized, lowercase for comparison)
+EXISTING_TITLES=$(jq -r '.files[].name' /tmp/existing_docs.json | tr '[:upper:]' '[:lower:]')
+
+echo "Existing docs already processed:"
+jq -r '.files[].name' /tmp/existing_docs.json
+```
+
+### Step 4: Process Each Meeting Folder
 
 For each meeting folder:
 
-#### 3a. List Files in Meeting Folder
+#### 4a. Derive Expected Doc Title
+
+```bash
+MEETING_FOLDER_NAME="..."
+
+# Extract date (YYYY-MM-DD prefix)
+if [[ "$MEETING_FOLDER_NAME" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+  MEETING_DATE="${BASH_REMATCH[1]}"
+  MEETING_DATE_FORMATTED=$(date -j -f "%Y-%m-%d" "$MEETING_DATE" +"%Y%m%d" 2>/dev/null || date -d "$MEETING_DATE" +"%Y%m%d")
+else
+  MEETING_DATE_FORMATTED=$(date +"%Y%m%d")
+  echo "NOTE: No date prefix found in '$MEETING_FOLDER_NAME', using generation date"
+fi
+
+# Strip date and optional timestamp prefix to get the meeting name
+MEETING_NAME=$(echo "$MEETING_FOLDER_NAME" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2} ([0-9]{2}\.[0-9]{2}\.[0-9]{2} )?//')
+
+DOC_TITLE="${MEETING_DATE_FORMATTED} ${MEETING_NAME}"
+```
+
+#### 4b. Skip If Already Processed (OVERWRITE=false)
+
+```bash
+DOC_TITLE_LOWER=$(echo "$DOC_TITLE" | tr '[:upper:]' '[:lower:]')
+
+if echo "$EXISTING_TITLES" | grep -qF "$DOC_TITLE_LOWER"; then
+  if [ "$OVERWRITE" = "true" ]; then
+    echo "OVERWRITE: Re-processing $MEETING_FOLDER_NAME"
+    # Get existing doc ID for overwrite
+    EXISTING_DOC_ID=$(jq -r --arg title "$DOC_TITLE" \
+      '.files[] | select(.name == $title) | .id' /tmp/existing_docs.json)
+  else
+    echo "SKIPPED_ALREADY_PROCESSED: $MEETING_FOLDER_NAME (doc '$DOC_TITLE' exists)"
+    continue
+  fi
+fi
+```
+
+#### 4c. List Files in Meeting Folder
 
 ```bash
 MEETING_FOLDER_ID="..."
-MEETING_FOLDER_NAME="..."
 
 gws drive files list \
   --query "'${MEETING_FOLDER_ID}' in parents and trashed = false" \
   --format json > /tmp/meeting_files_${MEETING_FOLDER_ID}.json
 ```
 
-#### 3b. Select Transcript Files
+#### 4d. Select Transcript Files
 
-Filter for `.txt` files, excluding audio/video:
+Filter for `.txt` files only, excluding audio/video:
 
 ```bash
-# Get transcript files (text/plain or .txt extension)
-TRANSCRIPT_FILES=$(jq -r '.files[] | 
-  select(.mimeType == "text/plain" or (.name | endswith(".txt"))) | 
-  select(.mimeType | startswith("video/") or startswith("audio/") | not) |
+TRANSCRIPT_FILES=$(jq -r '.files[] |
+  select(.mimeType == "text/plain" or (.name | endswith(".txt"))) |
+  select(.mimeType | (startswith("video/") or startswith("audio/")) | not) |
   "\(.id)|\(.name)"' /tmp/meeting_files_${MEETING_FOLDER_ID}.json)
 
-# Count transcripts
 TRANSCRIPT_COUNT=$(echo "$TRANSCRIPT_FILES" | grep -c . || echo 0)
 
 if [ "$TRANSCRIPT_COUNT" -eq 0 ]; then
@@ -150,13 +203,11 @@ if [ "$TRANSCRIPT_COUNT" -eq 0 ]; then
 fi
 ```
 
-#### 3c. Download and Merge Transcripts
+#### 4e. Download and Merge Transcripts
 
 ```bash
-# Create temp directory for this meeting
 mkdir -p /tmp/transcripts/${MEETING_FOLDER_ID}
 
-# Download each transcript file
 echo "$TRANSCRIPT_FILES" | while IFS='|' read FILE_ID FILE_NAME; do
   echo "Downloading: $FILE_NAME"
   gws drive files export \
@@ -166,17 +217,20 @@ echo "$TRANSCRIPT_FILES" | while IFS='|' read FILE_ID FILE_NAME; do
 done
 
 # Merge all transcripts in alphabetical order
+# If multiple files, separate them clearly
 MERGED_TRANSCRIPT=""
-for file in $(ls /tmp/transcripts/${MEETING_FOLDER_ID}/*.txt | sort); do
-  FILENAME=$(basename "$file")
-  MERGED_TRANSCRIPT="${MERGED_TRANSCRIPT}\n\n--- FILE: ${FILENAME} ---\n\n"
+FILE_COUNT=0
+for file in $(ls /tmp/transcripts/${MEETING_FOLDER_ID}/*.txt 2>/dev/null | sort); do
+  FILE_COUNT=$((FILE_COUNT + 1))
+  if [ $FILE_COUNT -gt 1 ]; then
+    FILENAME=$(basename "$file")
+    MERGED_TRANSCRIPT="${MERGED_TRANSCRIPT}\n\n--- CONTINUED: ${FILENAME} ---\n\n"
+  fi
   MERGED_TRANSCRIPT="${MERGED_TRANSCRIPT}$(cat "$file")"
 done
 
-# Save merged transcript
 echo -e "$MERGED_TRANSCRIPT" > /tmp/merged_transcript_${MEETING_FOLDER_ID}.txt
 
-# Check if transcript is usable (at least 100 characters)
 CHAR_COUNT=$(wc -c < /tmp/merged_transcript_${MEETING_FOLDER_ID}.txt)
 if [ "$CHAR_COUNT" -lt 100 ]; then
   echo "SKIPPED_EMPTY_TRANSCRIPT: $MEETING_FOLDER_NAME (only $CHAR_COUNT chars)"
@@ -184,151 +238,101 @@ if [ "$CHAR_COUNT" -lt 100 ]; then
 fi
 ```
 
-#### 3d. Parse Meeting Metadata
+#### 4f. Generate Meeting Notes
 
-Extract date and meeting name from folder name:
+Read the full merged transcript and generate structured notes. Claude must produce output in **exactly** this format — no additions, no reordering, no section renaming:
 
-```bash
-# Meeting folder name format: "YYYY-MM-DD HH.MM.SS Meeting Name"
-# or "YYYY-MM-DD Meeting Name"
-
-# Extract date (YYYY-MM-DD prefix)
-if [[ "$MEETING_FOLDER_NAME" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
-  MEETING_DATE="${BASH_REMATCH[1]}"
-  MEETING_DATE_FORMATTED=$(date -d "$MEETING_DATE" +"%Y%m%d")
-  MEETING_DATE_DISPLAY=$(date -d "$MEETING_DATE" +"%b %d, %Y")
-else
-  # Fallback to today's date
-  MEETING_DATE_FORMATTED=$(date +"%Y%m%d")
-  MEETING_DATE_DISPLAY=$(date +"%b %d, %Y")
-  echo "NOTE: No date prefix found, using generation date"
-fi
-
-# Extract meeting name (everything after date and timestamp)
-MEETING_NAME=$(echo "$MEETING_FOLDER_NAME" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2} ([0-9]{2}\.[0-9]{2}\.[0-9]{2} )?//')
-
-# Create doc title
-DOC_TITLE="${MEETING_DATE_FORMATTED} ${MEETING_NAME}"
 ```
-
-#### 3e. Generate Meeting Notes
-
-Read the merged transcript and generate structured notes:
-
-```bash
-# Read transcript
-TRANSCRIPT_CONTENT=$(cat /tmp/merged_transcript_${MEETING_FOLDER_ID}.txt)
-
-# Use Claude to generate meeting notes from transcript
-# This is where Claude analyzes the transcript and creates structured notes
-```
-
-**Meeting Notes Template** (to be populated by Claude):
-
-```markdown
-MMM D, YYYY | <Founder/Host> <> <Counterparty> - <Firm/Context>
+MMM D, YYYY | <Host> <> <Counterparty> - <Firm/Context>
 Attendees: <Name1>  <Name2>  <Name3>
 
 **Meeting Purpose**
-Short 1-liner on what this meeting is about.
+<One-line summary of what this meeting is about.>
 
 **Key Takeaways**
-- (Please summarise ALL key takeaways here, max 5 points)
+- <Key insight, decision, or conclusion — max 5 points>
 - ...
 
-**Discussion** (If you can, try to categorise them into topics)
-- Capture key discussions here, especially who said what
-- Risks, concerns, decisions made
-- Key questions asked
+**Discussion**
+<Topic Name>
+- <Key point attributed to speaker if possible>
+- <Decisions, concerns, risks raised>
+
+<Another Topic>
+- ...
 
 **Next Steps & Action Items**
 - **<Owner>**
-  - <Verb + task + context> — Due: <d MMM yy or blank or rough quarter of year>
+  - <Verb + task + context> — Due: <d MMM yy, rough quarter, or leave blank>
 - Or, none captured explicitly.
 ```
 
-**Style Guidelines for Claude:**
-- Crisp, factual, skimmable. No fluff.
-- Summarize, don't just "clean up" the transcript
-- Do NOT invent facts. If uncertain, keep it general
-- Extract attendees from speaker labels in transcript
-- Identify firms/contexts from capitalized entities
-- Always include **Next Steps & Action Items** section (even if "none captured")
+**Strict rules for Claude:**
+- Use title case, not ALL CAPS, for all section headings
+- Use bullet points, not numbered lists
+- Do NOT invent facts. If uncertain, keep it general or omit
+- Extract attendees from speaker labels in transcript (e.g. "John:", "Speaker 1:")
+- The header line (`MMM D, YYYY | ...`) uses the meeting date from the folder name, not today's date
+- Summarize — do NOT transcribe verbatim
+- Always include **Next Steps & Action Items** (even if "none captured explicitly")
+- Always include **Discussion** with topics grouped into sub-sections
 
-#### 3f. Check for Existing Doc (OVERWRITE logic)
+#### 4g. Create or Overwrite Google Doc
 
-```bash
-if [ "$OVERWRITE" = "true" ]; then
-  # Search for existing doc with same title in root folder
-  EXISTING_DOC=$(gws drive files search \
-    --query "name = '${DOC_TITLE}' and '${ROOT_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.document' and trashed = false" \
-    --format json | jq -r '.files[0].id // empty')
-  
-  if [ -n "$EXISTING_DOC" ]; then
-    echo "Found existing doc, will overwrite: $DOC_TITLE (ID: $EXISTING_DOC)"
-    DOC_ID="$EXISTING_DOC"
-    OVERWRITE_MODE=true
-  else
-    OVERWRITE_MODE=false
-  fi
-else
-  OVERWRITE_MODE=false
-fi
-```
-
-#### 3g. Create Google Doc (if not overwriting)
-
-```bash
-if [ "$OVERWRITE_MODE" = "false" ] && [ "$DRY_RUN" = "false" ]; then
-  # Create new Google Doc
-  DOC_JSON=$(gws docs documents create --json "{\"title\":\"${DOC_TITLE}\"}")
-  DOC_ID=$(echo "$DOC_JSON" | jq -r '.documentId')
-  
-  echo "Created doc: $DOC_TITLE (ID: $DOC_ID)"
-  
-  # Move doc to root Meetings folder
-  # Get current parents
-  PARENTS_JSON=$(gws drive files get --file-id "$DOC_ID" --fields 'parents')
-  REMOVE_PARENTS=$(echo "$PARENTS_JSON" | jq -r '.parents | join(",")')
-  
-  # Add to root folder, remove from current location
-  gws drive files update \
-    --file-id "$DOC_ID" \
-    --params "{\"addParents\": \"${ROOT_FOLDER_ID}\", \"removeParents\": \"${REMOVE_PARENTS}\"}"
-  
-  echo "Moved doc to root folder"
-fi
-```
-
-#### 3h. Write Content to Google Doc
+**Important**: Create the doc directly inside the root folder to avoid a separate move step (which can create duplicate entries).
 
 ```bash
 if [ "$DRY_RUN" = "false" ]; then
-  # Write the meeting notes to the doc
-  # Note: gws docs +write syntax may vary by version
-  # Check with: gws schema docs.documents.batchUpdate
-  
-  gws docs +write --document-id "$DOC_ID" --text "$NOTES_MARKDOWN"
-  
-  echo "✓ PROCESSED: $MEETING_FOLDER_NAME → $DOC_TITLE (ID: $DOC_ID)"
+  if [ "$OVERWRITE" = "true" ] && [ -n "$EXISTING_DOC_ID" ]; then
+    # Overwrite: clear existing doc content and rewrite
+    DOC_ID="$EXISTING_DOC_ID"
+    echo "Overwriting existing doc: $DOC_TITLE (ID: $DOC_ID)"
+    # Clear content first, then write
+    gws docs documents batchUpdate --document-id "$DOC_ID" \
+      --json '{"requests":[{"deleteContentRange":{"range":{"startIndex":1,"endIndex":99999}}}]}'
+  else
+    # Create new doc — specify parent folder at creation time to avoid duplicate placement
+    DOC_JSON=$(gws docs documents create \
+      --json "{\"title\":\"${DOC_TITLE}\"}" \
+      --parents "${ROOT_FOLDER_ID}")
+    DOC_ID=$(echo "$DOC_JSON" | jq -r '.documentId')
+    echo "Created doc: $DOC_TITLE (ID: $DOC_ID)"
+  fi
+
+  # Write meeting notes content to the doc
+  gws docs documents batchUpdate --document-id "$DOC_ID" \
+    --json "{\"requests\":[{\"insertText\":{\"location\":{\"index\":1},\"text\":$(echo "$NOTES_CONTENT" | jq -Rs .)}}]}"
+
+  echo "PROCESSED: $MEETING_FOLDER_NAME → $DOC_TITLE (ID: $DOC_ID)"
 else
-  echo "✓ DRY_RUN: Would process $MEETING_FOLDER_NAME → $DOC_TITLE"
+  echo "DRY_RUN: Would process $MEETING_FOLDER_NAME → $DOC_TITLE"
 fi
 ```
 
-### Step 4: Summary Report
+> **Note on `--parents` flag**: If your version of `gws` does not support `--parents` on `docs documents create`, fall back to creating the doc then immediately moving it:
+> ```bash
+> DOC_JSON=$(gws docs documents create --json "{\"title\":\"${DOC_TITLE}\"}")
+> DOC_ID=$(echo "$DOC_JSON" | jq -r '.documentId')
+> CURRENT_PARENTS=$(gws drive files get --file-id "$DOC_ID" --fields 'parents' | jq -r '.parents | join(",")')
+> gws drive files update \
+>   --file-id "$DOC_ID" \
+>   --add-parents "${ROOT_FOLDER_ID}" \
+>   --remove-parents "${CURRENT_PARENTS}"
+> ```
+> Verify the move succeeded before writing content. If the file still appears in the original location, it means `removeParents` did not execute correctly — retry the update.
 
-At the end, show summary:
+### Step 5: Summary Report
 
 ```bash
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "TRANSCRIPTION COMPLETE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Total folders scanned: $TOTAL_FOLDERS"
-echo "Processed: $PROCESSED_COUNT"
-echo "Skipped (no transcript): $SKIPPED_NO_TRANSCRIPT_COUNT"
-echo "Skipped (empty transcript): $SKIPPED_EMPTY_COUNT"
-echo "Errors: $ERROR_COUNT"
+echo "Total folders scanned:         $TOTAL_FOLDERS"
+echo "Already processed (skipped):   $SKIPPED_EXISTING_COUNT"
+echo "Processed (new):               $PROCESSED_COUNT"
+echo "Skipped (no transcript):       $SKIPPED_NO_TRANSCRIPT_COUNT"
+echo "Skipped (empty transcript):    $SKIPPED_EMPTY_COUNT"
+echo "Errors:                        $ERROR_COUNT"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ```
 
@@ -338,18 +342,14 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 ### Files to Ignore (Not Transcripts)
 
-**Video formats:**
-- `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`
-- Any file with `mimeType` starting with `video/`
-
-**Audio formats:**
-- `.m4a`, `.mp3`, `.wav`, `.aac`, `.flac`, `.ogg`
-- Any file with `mimeType` starting with `audio/`
+**Video formats:** `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi` — or `mimeType` starting with `video/`
+**Audio formats:** `.m4a`, `.mp3`, `.wav`, `.aac`, `.flac`, `.ogg` — or `mimeType` starting with `audio/`
 
 ### When to Skip a Meeting Folder
 
-- **SKIPPED_NO_TRANSCRIPT**: No `.txt` files found
-- **SKIPPED_EMPTY_TRANSCRIPT**: Transcript found but < 100 characters (unusable)
+- **SKIPPED_ALREADY_PROCESSED**: A Google Doc with the expected title already exists in the root folder (and OVERWRITE=false)
+- **SKIPPED_NO_TRANSCRIPT**: No `.txt` files found in the meeting subfolder
+- **SKIPPED_EMPTY_TRANSCRIPT**: `.txt` found but total content < 100 characters
 
 ---
 
@@ -359,12 +359,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 Parse date from folder name:
 
-1. If folder starts with `YYYY-MM-DD`, use that date
-2. Convert to `YYYYMMDD` (remove dashes)
-3. If no `YYYY-MM-DD` prefix:
-   - Try to infer from transcript content (best-effort)
-   - Fallback to today's date (last resort)
-   - Add note: "This meeting has no inferred title, defaulting to the date of generation."
+1. If folder starts with `YYYY-MM-DD`, use that date → convert to `YYYYMMDD`
+2. If no date prefix: try to infer from transcript content; fallback to today's date and add note
 
 ### Meeting Name
 
@@ -380,8 +376,40 @@ Remaining text becomes the meeting name.
 `{YYYYMMDD} {meeting name}`
 
 **Examples:**
-- Folder: `2026-02-26 12.26.41 Amy and Charlie`
-- Doc Title: `20260226 Amy and Charlie`
+- Folder: `2026-02-26 12.26.41 Amy & Charlie` → Doc: `20260226 Amy & Charlie`
+- Folder: `2026-03-01 14.30.00 Team Sync` → Doc: `20260301 Team Sync`
+
+---
+
+## Meeting Notes Format (Strict)
+
+The generated content must follow this exact layout — one Google Doc per meeting, one output file only:
+
+```
+MMM D, YYYY | <Host> <> <Counterparty> - <Firm/Context>
+Attendees: <Name1>  <Name2>  <Name3>
+
+**Meeting Purpose**
+<One-line summary.>
+
+**Key Takeaways**
+- <Point — max 5>
+- ...
+
+**Discussion**
+<Topic>
+- <Who said what, decisions, concerns>
+
+<Another Topic>
+- ...
+
+**Next Steps & Action Items**
+- **<Owner>**
+  - <Verb + task + context> — Due: <d MMM yy or blank>
+- Or, none captured explicitly.
+```
+
+**One doc per meeting. No separate summary file, no duplicate.**
 
 ---
 
@@ -390,53 +418,21 @@ Remaining text becomes the meeting name.
 ### Logging Per Folder
 
 Emit exactly one of:
-- **PROCESSED** — include meeting folder name, created/updated `DOC_ID`
+- **PROCESSED** — meeting folder name, `DOC_ID` of created/updated doc
+- **SKIPPED_ALREADY_PROCESSED** — folder already has a matching doc
 - **SKIPPED_NO_TRANSCRIPT** — folder has no `.txt`
-- **SKIPPED_EMPTY_TRANSCRIPT** — `.txt` found but content unusable
+- **SKIPPED_EMPTY_TRANSCRIPT** — `.txt` found but unusable
 - **ERROR_GENERATION** — notes generation failed
 - **ERROR_DOC_CREATE** — doc creation failed
 - **ERROR_DOC_WRITE** — doc writing failed (include `DOC_ID` for cleanup)
 
 ### Data Safety
 
-- ✅ Never move, rename, or delete files in meeting subfolders
-- ✅ Never modify original transcript files
-- ✅ Only create/update docs in root folder
-- ✅ If any step fails, skip that meeting and continue to next
-
----
-
-## Notes Generation Guidelines
-
-When Claude analyzes transcripts to generate meeting notes:
-
-### 1. Extract Metadata
-- **Attendees**: Look for speaker labels (e.g., "Speaker 1:", "John:", etc.)
-- **Firms/Context**: Identify from capitalized entities, company mentions
-- **Meeting Purpose**: Infer from opening remarks or recurring themes
-
-### 2. Identify Key Takeaways
-- Max 5 points
-- Focus on decisions, conclusions, important insights
-- Not just "what was discussed" but "what was decided/learned"
-
-### 3. Organize Discussion
-- Group by topic when possible
-- Capture who said what (attribute to speakers)
-- Note risks, concerns, decisions
-- Include key questions asked
-
-### 4. Extract Action Items
-- Look for commitments, tasks, follow-ups
-- Format: `**[Owner]**: [Verb] [task] [context] — Due: [date]`
-- If no explicit action items, state: "none captured explicitly"
-
-### 5. Style
-- Crisp, factual, skimmable
-- No fluff or filler
-- Summarize, don't transcribe verbatim
-- If uncertain about a fact, keep it general
-- Use bullet points, bold for emphasis
+- Never move, rename, or delete files in meeting subfolders
+- Never modify original transcript files
+- Only create/update docs in root folder
+- If any step fails, skip that meeting and continue to next
+- Never produce more than one output file per meeting
 
 ---
 
@@ -446,46 +442,45 @@ When Claude analyzes transcripts to generate meeting notes:
 
 ```
 📁 Meetings/ (ROOT_FOLDER_ID: abc123)
-  └── 📁 2026-02-26 12.26.41 Amy and Charlie/
-      ├── zoom_transcript.txt
-      └── recording.mp4 (ignored)
+  ├── 📁 2026-02-26 12.26.41 Amy & Charlie/   ← new, no doc yet
+  │   ├── zoom_transcript.txt
+  │   └── recording.mp4 (ignored)
+  └── 📄 20260301 Team Sync.gdoc              ← already processed, skip
 ```
 
 ### Processing Steps
 
 ```bash
-# 1. List meeting folders
-$ gws drive files list --query "'abc123' in parents and mimeType = 'application/vnd.google-apps.folder'"
+# 1. List existing docs in root → find "20260301 Team Sync" already exists
+# 2. List meeting subfolders → find "2026-02-26 12.26.41 Amy & Charlie"
+# 3. Derive expected title → "20260226 Amy & Charlie" → not in existing docs → process it
 
-# 2. For folder "2026-02-26 12.26.41 Amy and Charlie"
+# 4. List files in subfolder
 $ gws drive files list --query "'folder_id' in parents"
-# Found: zoom_transcript.txt (text/plain)
-# Found: recording.mp4 (ignored - video)
+# Found: zoom_transcript.txt (text/plain) ✓
+# Found: recording.mp4 (ignored — video) ✗
 
-# 3. Download transcript
+# 5. Download transcript
 $ gws drive files export --file-id "transcript_id" --mime-type "text/plain" --output-file "/tmp/transcript.txt"
 
-# 4. Generate notes from transcript
-# [Claude analyzes and creates structured notes]
+# 6. Generate notes (Claude analyzes full transcript content)
 
-# 5. Create Google Doc
-$ gws docs documents create --json '{"title":"20260226 Amy and Charlie"}'
-# Returns: {"documentId": "doc123"}
+# 7. Create Google Doc directly in root folder
+$ gws docs documents create --json '{"title":"20260226 Amy & Charlie"}' --parents "abc123"
+# Returns: {"documentId": "doc456"}
 
-# 6. Move to root folder
-$ gws drive files update --file-id "doc123" --params '{"addParents": "abc123", "removeParents": "..."}'
+# 8. Write content to doc
+$ gws docs documents batchUpdate --document-id "doc456" --json '...'
 
-# 7. Write content
-$ gws docs +write --document-id "doc123" --text "$NOTES_MARKDOWN"
-
-✓ PROCESSED: 2026-02-26 12.26.41 Amy and Charlie → 20260226 Amy and Charlie (ID: doc123)
+✓ PROCESSED: 2026-02-26 12.26.41 Amy & Charlie → 20260226 Amy & Charlie (ID: doc456)
+✓ SKIPPED_ALREADY_PROCESSED: 20260301 Team Sync (doc exists)
 ```
 
 ### Output Google Doc
 
-**Title**: `20260226 Amy and Charlie`
+**Title**: `20260226 Amy & Charlie`
 
-**Content**:
+**Content** (one doc, exactly this format):
 ```
 Feb 26, 2026 | Amy <> Charlie - Initial Discussion
 Attendees: Amy  Charlie
@@ -494,28 +489,26 @@ Attendees: Amy  Charlie
 Initial conversation about potential collaboration on Q2 project.
 
 **Key Takeaways**
-- Both parties interested in moving forward with partnership
-- Budget range: $50K-$100K for Q2
-- Timeline: Decision by mid-March
-- Need to involve legal teams for contract review
+- Both parties interested in moving forward with a partnership
+- Budget range: $50K–$100K for Q2
+- Timeline: decision by mid-March
+- Legal teams need to be involved for contract review
 - Technical feasibility confirmed
 
 **Discussion**
 
 Product Scope
-- Charlie outlined current platform capabilities
-- Amy shared requirements for integration
-- Both agreed on phased approach starting with MVP
+- Charlie outlined current platform capabilities and integration options
+- Amy shared integration requirements; both agreed on a phased MVP approach
 
 Budget & Timeline
-- Amy: Budget allocated for Q2, prefer to start in April
-- Charlie: Team availability aligns with April start
-- Discussion on payment terms (milestone-based preferred)
+- Amy: budget allocated for Q2, prefers April start
+- Charlie: team availability aligns with April; milestone-based payment preferred
 
 Technical Considerations
-- API integration will take 2-3 weeks
-- Need dedicated staging environment
-- Charlie to provide technical documentation
+- API integration estimated at 2–3 weeks
+- Dedicated staging environment required
+- Charlie to provide technical documentation post-call
 
 **Next Steps & Action Items**
 - **Charlie**
@@ -531,10 +524,8 @@ Technical Considerations
 
 ## CLI Command Reference
 
-### Essential gws Commands
-
 ```bash
-# List folders
+# List folders/files
 gws drive files list --query "<query>" --format json
 
 # Search for files/folders
@@ -543,44 +534,22 @@ gws drive files search --query "<query>" --format json
 # Get file metadata
 gws drive files get --file-id "<id>" --fields 'parents'
 
-# Export file content
+# Export file content (transcripts)
 gws drive files export --file-id "<id>" --mime-type "text/plain" --output-file "<path>"
 
-# Update file (move to folder)
-gws drive files update --file-id "<id>" --params '{"addParents":"<id>","removeParents":"<id>"}'
+# Move file to folder (update parents)
+gws drive files update --file-id "<id>" --add-parents "<folder-id>" --remove-parents "<old-parent-id>"
 
-# Create Google Doc
-gws docs documents create --json '{"title":"<title>"}'
+# Create Google Doc (prefer with --parents to avoid duplicate placement)
+gws docs documents create --json '{"title":"<title>"}' --parents "<folder-id>"
 
-# Write to Google Doc
-gws docs +write --document-id "<id>" --text "<content>"
+# Write to Google Doc via batchUpdate
+gws docs documents batchUpdate --document-id "<id>" --json '<requests json>'
 
-# Check schema for exact flags
+# Check schema for exact flags for your gws version
 gws schema drive.files.list
 gws schema docs.documents.create
-```
-
----
-
-## Testing Before Full Run
-
-### Dry Run Mode
-
-```
-User: "Transcribe meetings in 'Team Meetings' folder in dry run mode"
-```
-
-This will:
-- List all meeting folders
-- Check for transcripts
-- Show what would be processed
-- NOT create any docs
-
-### Single Folder Test
-
-Process just one meeting folder first:
-```
-User: "Transcribe just the '2026-02-26 Amy and Charlie' meeting"
+gws schema docs.documents.batchUpdate
 ```
 
 ---
@@ -593,54 +562,30 @@ npm install -g @googleworkspace/cli
 gws auth login
 ```
 
-### "Permission denied" errors
-- Ensure `gws auth login` was successful
-- Check that account has access to the Meetings folder
-- Verify Docs API is enabled
+### Two docs appearing per meeting
+- The `--parents` flag on `docs documents create` may not be supported by your gws version
+- Use the fallback move approach (Step 4g) and verify `removeParents` executed correctly
+- Check: `gws drive files get --file-id "<doc-id>" --fields 'parents'` — should show only one parent
 
 ### "No transcripts found" but files exist
-- Check file extensions (must be `.txt`)
-- Verify files are not actually audio/video
-- Check mimeType is `text/plain`
+- Files must be `.txt` with `mimeType = text/plain`
+- Check with: `gws drive files list --query "'<folder_id>' in parents" --format json | jq '.files[] | {name, mimeType}'`
 
-### Transcript content looks wrong
-- Check file encoding (should be UTF-8)
-- Verify file isn't corrupted
-- Try manually downloading to inspect
+### All folders show as "already processed"
+- This is correct behavior on re-runs — only new folders without matching docs are processed
+- Use `OVERWRITE=true` to force re-processing all meetings
 
 ### Doc creation works but writing fails
-- Check `gws docs +write` syntax for your gws version
-- Use `gws schema docs.documents.batchUpdate` to see available methods
-- May need to use `batchUpdate` instead of `+write`
-
----
-
-## Performance Notes
-
-- Processing 10 meetings takes ~2-5 minutes
-- Most time spent on:
-  - Downloading transcript files
-  - Claude analyzing transcripts
-  - Creating Google Docs
-
-- Optimization tips:
-  - Use dry run first to validate structure
-  - Process in batches if many meetings
-  - Can parallelize folder processing if needed
+- Check `gws schema docs.documents.batchUpdate` for supported request types
+- The `insertText` request requires content starting at index 1 (not 0)
 
 ---
 
 ## Minimal Required Capabilities
 
-This skill requires:
-- ✅ Drive: list files/folders
-- ✅ Drive: get file metadata
-- ✅ Drive: export file content
-- ✅ Drive: update file parents (move)
-- ✅ Docs: create document
-- ✅ Docs: write/update document content
+- Drive: list files/folders, get file metadata, export file content, update file parents
+- Docs: create document, batchUpdate (insertText, deleteContentRange)
 
-Check availability:
 ```bash
 gws schema drive.files.list
 gws schema drive.files.get
@@ -649,16 +594,3 @@ gws schema drive.files.update
 gws schema docs.documents.create
 gws schema docs.documents.batchUpdate
 ```
-
----
-
-## Remember
-
-🎯 **Core Workflow**:
-1. Find meeting folders with transcripts
-2. Download and merge transcript files
-3. Generate structured notes (Claude analyzes)
-4. Create Google Doc in root folder
-5. Write formatted notes to doc
-
-The skill transforms raw transcripts into professional meeting notes that are skimmable, actionable, and properly organized.
