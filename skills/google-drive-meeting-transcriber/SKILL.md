@@ -49,7 +49,7 @@ npm install -g @googleworkspace/cli
 gws auth login
 
 # Verify access
-gws drive files list --max-results 5
+gws drive files list
 ```
 
 ---
@@ -96,12 +96,11 @@ User: "Transcribe meetings in 'Team Meetings', dry run"
 
 ### Step 1: Get ROOT_FOLDER_ID
 
-If user provides folder name, search for it:
+If user provides folder name, search for it, then look for the folder name inside the `name` variable and get the `id`:
 
 ```bash
-gws drive files search \
-  --query "name = 'Meetings' and mimeType = 'application/vnd.google-apps.folder'" \
-  --format json | jq -r '.files[0].id'
+gws drive files list \
+  --format json
 ```
 
 If user provides URL like `https://drive.google.com/drive/folders/ABC123`, extract `ABC123`.
@@ -110,7 +109,7 @@ If user provides URL like `https://drive.google.com/drive/folders/ABC123`, extra
 
 ```bash
 gws drive files list \
-  --query "'${ROOT_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false" \
+  --query "'1Yh-tq1Jl479y9dPREVXtBk2ZNZ4SMhOO' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false" \
   --format json > /tmp/meeting_folders.json
 
 echo "Found meeting folders:"
